@@ -35,7 +35,10 @@ fn textdata_to_key_locks(textdata: String) -> (Vec<Key>, Vec<Lock>) {
             true => locks.push(Lock { levels }),
             false => keys.push(Key { levels }),
         }
-        if lines.next().is_none() { break }
+        match lines.next() {
+            None => break,
+            _ => (),
+        }
     }
     (keys, locks)
 }
@@ -49,36 +52,35 @@ fn main() {
 
     let (keys, locks): (Vec<Key>, Vec<Lock>) = textdata_to_key_locks(textdata);
     let mut key_map: [[Vec<usize>; 5]; 7] = from_fn(|_| from_fn(|_| Vec::new()));
-    keys.iter().enumerate()
-        .flat_map(|(key_id, key)| key.levels.into_iter()
-            .enumerate()
-            .map(move |(col, level)| (key_id, col, level)))
-        .flat_map(|(key_id, col, level)| (level..7).map(move |row| (key_id, col, row)))
-        .for_each(|(key_id, col, row)| key_map[row as usize][col].push(key_id));
-
+    keys.iter().enumerate().for_each(
+        |(key_id, &Key { levels })| levels.iter().enumerate().for_each(
+            |(col, &level)| (level..7).for_each(
+                |row| key_map[row as usize][col as usize].push(key_id)
+            )
+        )
+    );
     let key_map = key_map;
 
+    let key_map_numbers: [[usize; 5]; 7] = key_map.clone().map(|row| row.map(|vec| vec.len()));
+    key_map_numbers.iter()
+        .for_each(|vec| {
+            println!("{}", vec.into_iter().map(|num| format!("{num:>4}")).collect::<String>());
+        });
+
     let mut pass: usize = 0;
-    for Lock { levels } in locks.iter() {
+    for &Lock { levels } in locks.iter() {
         let mut fit: Vec<bool> = (0..keys.len()).map(|_| true).collect();
-        levels.iter()
+        levels.into_iter()
             .enumerate()
-            .map(|(col, &row_level)| (col, row_level as usize -1))
-            .flat_map(|(col, row)| &key_map[row][col])
-            .for_each(|num| {fit[*num] = false;});
+            .flat_map(|(col, row_level)| (0..row_level).map(move |row| (row, col)))
+            .flat_map(|(row, col)| &key_map[row as usize][col as usize])
+            .for_each(|&num| {fit[num] = false;});
         
         pass += fit.into_iter().filter(|&val| val).count();
     }
 
     let after = before.elapsed();
-
-    let key_map_numbers: [[usize; 5]; 7] = key_map.clone().map(|row| row.map(|vec| vec.len()));
-    key_map_numbers.iter()
-        .for_each(|vec| {
-            // println!("{}", vec.iter().map(|num| format!("{num:>4}")).collect::<String>());
-            println!("{}", vec.iter().fold(String::new(), |string, next| string + &format!("{next:>4}")));
-        });
-
     println!("(Part I) number of fits: {pass}");
     println!("(Part I) time elapsed: {after:.2?}");
 }
+
