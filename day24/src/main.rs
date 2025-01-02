@@ -6,9 +6,19 @@ use rand::{SeedableRng, Rng};
 use rand_chacha::ChaCha8Rng;
 use std::iter::once;
 
-const NUM_PER_TEST: u64 = 20;
+const FALSE_THRESHOLD: f32 = 1e-5;
+const NUM_SWAPS: usize = 4;
 
-#[derive(Clone, Copy)]
+fn tolerance_sample_num(fail_prob: f32, num_swaps: usize, num_gates: usize) -> usize {
+    // Assumes that each random sample has a 50% chance of a false positive.
+    // Linear approximation where fail_prob << 1.
+    assert!((0. ..=1.).contains(&fail_prob), "fail_probe ({fail_prob}) must be between 0 and 1");
+    let approx_sample_num_float: f32 = - (fail_prob / ((num_swaps * num_gates.pow(2)) as f32)).log2();
+    let sample_num: usize = approx_sample_num_float.ceil() as usize;
+    sample_num
+}
+
+#[derive(Clone, Debug)]
 struct GateString<'a> {
     wire1: &'a str,
     wire2: &'a str,
@@ -28,7 +38,6 @@ struct Gate {
     wire1: u16,
     wire2: u16,
     op: Operation,
-    wire3: u16,
 }
 
 fn wire_from_line(string: &str) -> (&str, bool) {
@@ -105,7 +114,7 @@ fn get_wire_value(wire3: u16, gates: &[Option<Gate>], wires: &mut [Option<bool>]
 }
 
 fn gate_to_gateshort(gate: &GateString, str_to_num: &BTreeMap<&str, u16>) -> Gate {
-    let &GateString { wire1, wire2, op, wire3 } = gate;
+    let &GateString { wire1, wire2, op, .. } = gate;
 
     Gate { 
         wire1: *str_to_num.get(wire1).unwrap(),
@@ -116,7 +125,6 @@ fn gate_to_gateshort(gate: &GateString, str_to_num: &BTreeMap<&str, u16>) -> Gat
             "XOR" => Operation::Xor,
             other => panic!("Case ({other}) not covered!"),
         },
-        wire3: *str_to_num.get(wire3).unwrap(),
     }
 }
 
@@ -155,8 +163,8 @@ fn info_from_textdata(textdata: &str) -> (Vec<Option<bool>>, Vec<Option<Gate>>, 
 
     let gates: Vec<Option<Gate>> = wires_set
         .iter()
-        .map(|string| gates_info.get(string).copied())
-        .map(|gate| gate.map(|val| gate_to_gateshort(&val, &str_to_num)))
+        .map(|string| gates_info.get(string))
+        .map(|gate| gate.map(|val| gate_to_gateshort(val, &str_to_num)))
         .collect();
 
     (wires, gates, str_to_num, num_to_str)
@@ -307,10 +315,14 @@ fn main() {
     //    until it's found.
     // 4. Move on to the next digit, keeping track of which wires are "correct" until the end.
 
+    let num_gates: usize = default_gates.len();
+    let num_per_test: usize = tolerance_sample_num(FALSE_THRESHOLD, NUM_SWAPS, num_gates);
+    println!("    false-positive tolerance: {FALSE_THRESHOLD:.0e}  ->  num of random samples: {num_per_test}");
     let mut rng = ChaCha8Rng::seed_from_u64(2);
-    let test_numbers: [[u64; 2]; NUM_PER_TEST as usize] = from_fn(|_| 
-        from_fn(|_| rng.gen_range(0..2u64.pow(x_wires.len() as u32)))
-        );
+    let test_numbers: Vec<[u64; 2]> = (0..num_per_test)
+        .map(|_| from_fn(|_| rng.gen_range(0..2u64.pow(x_wires.len() as u32))))
+        .collect();
+
 
     let mut swapped_numbers: Vec<[u16; 2]> = Vec::new();
     let mut unproven_wires: BTreeSet<u16> = BTreeSet::from_iter(0u16..wires.len() as u16);
@@ -374,7 +386,6 @@ fn small_test() {
     let default_wires: Vec<Option<bool>> = item.0;
     let default_gates: Vec<Option<Gate>> = item.1;
     let str_to_num: BTreeMap<&str, u16> = item.2;
-    let num_to_str: BTreeMap<u16, &str> = item.3;
 
     let mut x_wire_names = wire_names_with_char('x', &str_to_num);
     let mut y_wire_names = wire_names_with_char('y', &str_to_num);
@@ -387,13 +398,13 @@ fn small_test() {
         .map(|string| str_to_num.get(string).copied().unwrap()) .collect();
     let y_wires: Vec<u16> = y_wire_names.iter()
         .map(|string| str_to_num.get(string).copied().unwrap()) .collect();
-    let z_wires: Vec<u16> = z_wire_names.iter()
-        .map(|string| str_to_num.get(string).copied().unwrap()) .collect();
 
     let mut rng = ChaCha8Rng::seed_from_u64(2);
-    let test_numbers: [[u64; 2]; NUM_PER_TEST as usize] = from_fn(|_| 
-        from_fn(|_| rng.gen_range(0..2u64.pow(x_wires.len() as u32)))
-        );
+    let num_gates: usize = default_gates.len();
+    let num_per_test: usize = tolerance_sample_num(FALSE_THRESHOLD, NUM_SWAPS, num_gates);
+    let test_numbers: Vec<[u64; 2]> = (0..num_per_test)
+        .map(|_| from_fn(|_| rng.gen_range(0..2u64.pow(x_wires.len() as u32))))
+        .collect();
 
     let mut loop_wires = default_wires.clone();
 
