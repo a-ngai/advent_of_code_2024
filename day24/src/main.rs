@@ -6,6 +6,10 @@ use rand::{SeedableRng, Rng};
 use rand_chacha::ChaCha8Rng;
 use std::iter::once;
 
+// Possible optimization:
+// - Not all gate swaps lead to a change in the z-digit. We can drastically cut down the number of gate swaps
+// we test if we keep track of this.
+
 const FALSE_THRESHOLD: f32 = 1e-5;
 const NUM_SWAPS: usize = 4;
 
@@ -38,6 +42,7 @@ struct Gate {
     wire1: u16,
     wire2: u16,
     op: Operation,
+    wire3: u16,
 }
 
 fn wire_from_line(string: &str) -> (&str, bool) {
@@ -114,7 +119,7 @@ fn get_wire_value(wire3: u16, gates: &[Option<Gate>], wires: &mut [Option<bool>]
 }
 
 fn gate_to_gateshort(gate: &GateString, str_to_num: &BTreeMap<&str, u16>) -> Gate {
-    let &GateString { wire1, wire2, op, .. } = gate;
+    let &GateString { wire1, wire2, op, wire3 } = gate;
 
     Gate { 
         wire1: *str_to_num.get(wire1).unwrap(),
@@ -125,6 +130,7 @@ fn gate_to_gateshort(gate: &GateString, str_to_num: &BTreeMap<&str, u16>) -> Gat
             "XOR" => Operation::Xor,
             other => panic!("Case ({other}) not covered!"),
         },
+        wire3: *str_to_num.get(wire3).unwrap(),
     }
 }
 
@@ -181,55 +187,6 @@ fn set_x_y_wires(loop_wires: &mut [Option<bool>], x_wires: &[u16], y_wires: &[u1
     }
 }
 
-fn measure_error(
-    test_numbers: &[[u64; 2]], 
-    digits: &[usize], 
-    x_wires: &[u16], 
-    y_wires: &[u16], 
-    z_wires: &[u16], 
-    wires: &Vec<Option<bool>>, 
-    gates: &[Option<Gate>]
-    ) -> Option<usize> {
-
-    let mut measure: Option<usize> = None;
-    let mut loop_wires = wires.to_owned();
-    
-    for &[test_x, test_y] in test_numbers {
-        loop_wires.iter_mut().zip(wires.iter())
-            .for_each(|(old, new)| *old = *new);
-        set_x_y_wires(&mut loop_wires, x_wires, y_wires, test_x, test_y);
-
-        let z_wire_results: Vec<Option<bool>> = z_wires.iter()
-            .map(|&num| get_wire_value( num, gates, &mut loop_wires))
-            .collect();
-        if z_wire_results.iter().any(|&result| result.is_none()) { break }
-
-        let z_digits: Vec<bool> = z_wires.iter()
-            .map(|&num| get_wire_value( num, gates, &mut loop_wires).unwrap()).collect();
-
-        let mut add_digits: Vec<bool> = Vec::new();
-        let mut shift_add = test_x + test_y;
-        for _ in 0..z_wires.len() {
-            add_digits.push((shift_add & 1) == 1);
-            shift_add >>= 1;
-        }
-
-        let correct_measure: usize = add_digits.into_iter().zip(z_digits.into_iter())
-            .enumerate()
-            .filter(|(num, _)| digits.contains(num))
-            .map(|(_index, (add, z))| add == z)
-            .map(|val| match val {true => 0, false => 1})
-            .sum();
-
-        match measure {
-            Some(num) => measure = Some(num + correct_measure),
-            None => measure = Some(correct_measure),
-        }
-    }
-    measure
-}
-
-
 fn make_gate_swap<'a>(gates: &[Option<Gate>], swaps: &[[usize; 2]]) -> Result<Vec<Option<Gate>>, &'a str>{
     let mut swap_gates: Vec<Option<Gate>> = gates.to_owned();
     for &[num1, num2] in swaps {
@@ -248,15 +205,13 @@ fn make_gate_swap<'a>(gates: &[Option<Gate>], swaps: &[[usize; 2]]) -> Result<Ve
     Ok(swap_gates)
 }
 
-fn make_wire_swap(wires: &[Option<bool>], swaps: &[[usize; 2]]) -> Vec<Option<bool>> {
-    let mut swap_wires = wires.to_owned();
+fn swap_wires(wires: &mut [Option<bool>], swaps: &[[usize; 2]]) {
     for &[num1, num2] in swaps {
-        let wire1 = swap_wires[num1];
-        let wire2 = swap_wires[num2];
-        swap_wires[num1] = wire2;
-        swap_wires[num2] = wire1;
-    }
-    swap_wires
+        let wire1 = (*wires)[num1];
+        let wire2 = (*wires)[num2];
+        wires[num1] = wire2;
+        wires[num2] = wire1;
+    };
 }
 
 fn wires_to_binary(char_wires: &[u16], gates: &[Option<Gate>], wires: &mut [Option<bool>]) -> String {
@@ -326,17 +281,46 @@ fn main() {
 
     let mut swapped_numbers: Vec<[u16; 2]> = Vec::new();
     let mut unproven_wires: BTreeSet<u16> = BTreeSet::from_iter(0u16..wires.len() as u16);
-    let mut swap_gates = default_gates.clone();
-    let mut swap_wires = default_wires.clone();
-    for digit in 0..x_wires.len() {
+    let mut proven_gates = default_gates.clone();
+    let mut proven_wires: Vec<Vec<Option<bool>>> = (0..test_numbers.len())
+        .map(|_| default_wires.clone())
+        .collect();
+    proven_wires.iter_mut().zip(test_numbers.iter()).for_each(|(wires, &[test_x, test_y])| { 
+        set_x_y_wires(wires, &x_wires, &y_wires, test_x, test_y); 
+    });
 
-        let connected_wires: Vec<u16> = get_wire_connections(z_wires[digit], &swap_gates).unwrap();
+    let test_add_digits: Vec<Vec<bool>> = test_numbers.into_iter()
+        .map(|array| array.iter().sum())
+        .map(|num| {
+            let mut shift_add: u64 = num;
+            let mut add_digits: Vec<bool> = Vec::new();
+            for _ in 0..z_wires.len() {
+                add_digits.push((shift_add & 1) == 1);
+                shift_add >>= 1;
+            }
+            add_digits
+        })
+        .collect();
 
-        let measure = measure_error(
-            &test_numbers, &[digit,], &x_wires, &y_wires, &z_wires, &swap_wires, &swap_gates
-            ).unwrap();
+    let mut test_gates: Vec<Option<Gate>> = Vec::new();
+    let mut test_wires: Vec<Vec<Option<bool>>> = Vec::new();
+    for (digit, &z_wire)  in z_wires.iter().enumerate() {
+
+        test_gates.clone_from(&proven_gates);
+        test_wires.clone_from(&proven_wires);
+
+        let connected_wires: Vec<u16> = get_wire_connections(z_wire, &test_gates).unwrap();
+
+        let measure: usize = (0..num_per_test)
+            .map(|index| get_wire_value(z_wire, &test_gates, &mut test_wires[index]).unwrap())
+            .enumerate()
+            .map(|(index, val)| test_add_digits[index][digit] != val)
+            .filter(|&val| val)
+            .count();
 
         if measure == 0 {
+            proven_gates.clone_from(&test_gates);
+            proven_wires.clone_from(&test_wires);
             connected_wires.iter().for_each(|num| {unproven_wires.remove(num);});
             continue
         }
@@ -346,21 +330,28 @@ fn main() {
             .collect();
 
         for &[num1, num2] in candidate_swaps.iter() {
+
             let test_comb = [[num1 as usize, num2 as usize],];
-            let loop_gates = match make_gate_swap(&swap_gates, &test_comb) {
+            let test_gates = match make_gate_swap(&proven_gates, &test_comb) {
                 Ok(val) => val,
                 Err(_) => continue
             };
-            let loop_wires = make_wire_swap(&swap_wires, &test_comb);
-            let measure = measure_error(
-                &test_numbers, &[digit,], &x_wires, &y_wires, &z_wires, &loop_wires, &loop_gates
-                );
+            test_wires.clone_from(&proven_wires);
+            test_wires.iter_mut().for_each(|wires| {swap_wires(wires, &test_comb);});
 
-            if measure.is_none() { continue }
-            if measure.unwrap() == 0 { 
+            if get_wire_value(z_wire, &test_gates, &mut test_wires[0]).is_none() { continue }
+
+        let measure: usize = (0..num_per_test)
+            .map(|index| get_wire_value(z_wire, &test_gates, &mut test_wires[index]).unwrap())
+            .enumerate()
+            .map(|(index, val)| test_add_digits[index][digit] != val)
+            .filter(|&val| val)
+            .count();
+
+            if measure == 0 { 
                 swapped_numbers.push([num1, num2]);
-                swap_gates = make_gate_swap(&swap_gates, &test_comb).unwrap();
-                swap_wires = make_wire_swap(&swap_wires, &test_comb);
+                proven_gates.clone_from(&test_gates);
+                proven_wires.clone_from(&test_wires);
                 break
             }
         }
